@@ -2,6 +2,7 @@ import sys
 import os
 import ast
 import json
+from collections import defaultdict
 
 
 class Module:
@@ -76,6 +77,8 @@ def parse_method_calls_in_modules(modules):
             loc_exclude = set()
             loc = set()
 
+            method_call_count = defaultdict(int)
+
             source_tree = ast.parse(f.read())
             for node in ast.walk(source_tree):
                 if isinstance(node, ast.Import):
@@ -91,10 +94,21 @@ def parse_method_calls_in_modules(modules):
                         else:
                             modified_module.external_imports.append((node.module, alias.name, alias.asname))
                 elif isinstance(node, ast.Call):
+                    method_name = None
                     if isinstance(node.func, ast.Name):
-                        modified_module.method_calls.append(node.func.id)
+                        method_name = node.func.id
                     elif isinstance(node.func, ast.Attribute):
-                        modified_module.method_calls.append(node.func.attr)
+                        full_name = []
+                        current = node.func
+                        while isinstance(current, ast.Attribute):
+                            full_name.insert(0, current.attr)
+                            current = current.value
+                        if isinstance(current, ast.Name):
+                            full_name.insert(0, current.id)
+                        method_name = ".".join(full_name)
+
+                    if method_name:
+                        method_call_count[method_name] += 1
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
                     has_docstring = ast.get_docstring(node, clean=False)
                     if has_docstring:
@@ -104,6 +118,7 @@ def parse_method_calls_in_modules(modules):
                 if hasattr(node, 'lineno') and node.lineno not in loc_exclude:
                     loc.add(node.lineno)
 
+            modified_module.method_calls = method_call_count
             modified_module.LOC = len(loc)
             result[module_name] = modified_module
 
