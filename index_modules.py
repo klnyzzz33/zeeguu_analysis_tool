@@ -16,17 +16,21 @@ class Module:
         self.dependencies = []
         self.LOC = 0
 
-    def __str__(self):
-        return json.dumps({
+    def to_dict(self):
+        return {
             "name": self.name,
             "path": self.path,
             "exports": self.exports,
-            "internal_imports": self.internal_imports,
+            "internal_imports": ["module: " + str(module.name) + ", submodule: " + str(submodule) + ", alias: "
+                                 + str(alias) for (module, submodule, alias) in self.internal_imports],
             "external_imports": self.external_imports,
             "method_calls": self.method_calls,
             "dependencies": self.dependencies,
             "LOC": self.LOC
-        }, indent=2)
+        }
+
+    def __str__(self):
+        return json.dumps(self.to_dict(), indent=2)
 
     def __repr__(self):
         return self.__str__()
@@ -127,6 +131,22 @@ def parse_method_calls_in_modules(modules):
 
     return result
 
+
+def resolve_internal_imports(modules):
+    result = {}
+
+    for (module_name, module) in modules.items():
+        modified_module = module
+        resolved_internal_imports = []
+        for (import_module_name, submodule, import_alias) in module.internal_imports:
+            resolved_internal_imports.append((modules[import_module_name], submodule, import_alias))
+
+        modified_module.internal_imports = resolved_internal_imports
+        result[module_name] = modified_module
+
+    return result
+
+
 def calculate_dependencies(modules):
     result = {}
 
@@ -135,10 +155,27 @@ def calculate_dependencies(modules):
         dependencies = defaultdict(int)
         internal_imports = module.internal_imports
         for (method_name, method_call_count) in module.method_calls.items():
-            dependency_name = method_name[:method_name.rfind('.')]
-            dependency = next((tup for tup in internal_imports if dependency_name in tup), None)
-            if dependency:
-                dependencies[dependency_name] += method_call_count
+            pos = method_name.rfind('.')
+            dependency = None
+            if pos != -1:
+                dependency_name = method_name[:pos]
+                dependency = next((module.name for (module, _, alias) in internal_imports
+                                if module.name == dependency_name or alias == dependency_name), None)
+                # TODO ide jön az utolsó case
+            else:
+                # itt export vizsgálat
+                for (import_module, import_submodule, import_alias) in reversed(internal_imports):
+                    if import_submodule == '*' or import_submodule == method_name:
+                        for export in import_module.exports:
+                            if export == method_name:
+                                dependency = import_module.name
+                                break
+                        if dependency:
+                            break
+                    elif import_alias == method_name:
+                        dependency = import_module.name
+                        break
+            dependencies[dependency] += method_call_count
 
         modified_module.dependencies = dependencies
         result[module_name] = modified_module
@@ -157,12 +194,12 @@ def main():
 
     modules = parse_method_calls_in_modules(modules)
 
+    modules = resolve_internal_imports(modules)
+
     modules = calculate_dependencies(modules)
 
-    print(json.dumps([json.loads(str(module)) for module in modules.values()], indent=2))
+    print(json.dumps([module.to_dict() for module in modules.values()], indent=2))
 
 
 if __name__ == "__main__":
     main()
-
-## PyFile: {OrderedList<PyFile> imports, List<Method> methodCalls, List<Method> methodDefs}
