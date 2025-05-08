@@ -10,10 +10,11 @@ class Module:
         self.exports = []
         self.imports = []
         self.method_calls = []
+        self.LOC = 0
 
     def __str__(self):
         return (self.name + " '<" + self.path + ">': exports=" + str(self.exports) + ", imports=" + str(self.imports)
-                + ", method_calls=" + str(self.method_calls))
+                + ", method_calls=" + str(self.method_calls) + ", LOC=" + str(self.LOC))
 
     def __repr__(self):
         return self.__str__()
@@ -40,16 +41,16 @@ def get_exports_from_modules_recursive(base_dir, parent_package):
             module_name = module_name.replace(".__init__.py", "")
             module_name = module_name.replace(".py", "")
 
-            function_defs = []
-            with open(full_path) as f:
+            with open(full_path, mode="r", encoding="utf-8") as f:
+                function_defs = []
                 tree = ast.parse(f.read())
                 for node in tree.body:
                     if isinstance(node, ast.FunctionDef):
                         function_defs.append(node.name)
 
-            module = Module(module_name, full_path)
-            module.exports = function_defs
-            result[module_name] = module
+                module = Module(module_name, full_path)
+                module.exports = function_defs
+                result[module_name] = module
         elif os.path.isdir(full_path):
             result.update(get_exports_from_modules_recursive(full_path, parent_package))
 
@@ -62,6 +63,8 @@ def parse_method_calls_in_modules(modules):
     for (module_name, module) in modules.items():
         with open(module.path, mode="r", encoding="utf-8") as f:
             modified_module = module
+            loc_exclude = set()
+            loc = set()
 
             source_tree = ast.parse(f.read())
             for node in ast.walk(source_tree):
@@ -72,13 +75,20 @@ def parse_method_calls_in_modules(modules):
                     for alias in node.names:
                         modified_module.imports.append((node.module, alias.name, alias.asname))
                 elif isinstance(node, ast.Call):
-                    print(node.func.id)
-                    print(node.func.attr)
                     if isinstance(node.func, ast.Name):
                         modified_module.method_calls.append(node.func.id)
                     elif isinstance(node.func, ast.Attribute):
                         modified_module.method_calls.append(node.func.attr)
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
+                    has_docstring = ast.get_docstring(node, clean=False)
+                    if has_docstring:
+                        docstring = node.body[0]
+                        loc_exclude.update(list(range(docstring.lineno, docstring.end_lineno + 1)))
 
+                if hasattr(node, 'lineno') and node.lineno not in loc_exclude:
+                    loc.add(node.lineno)
+
+            modified_module.LOC = len(loc)
             result[module_name] = modified_module
 
     return result
