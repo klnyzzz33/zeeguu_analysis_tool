@@ -13,6 +13,7 @@ class Module:
         self.internal_imports = []
         self.external_imports = []
         self.method_calls = []
+        self.dependencies = []
         self.LOC = 0
 
     def __str__(self):
@@ -23,6 +24,7 @@ class Module:
             "internal_imports": self.internal_imports,
             "external_imports": self.external_imports,
             "method_calls": self.method_calls,
+            "dependencies": self.dependencies,
             "LOC": self.LOC
         }, indent=2)
 
@@ -107,7 +109,8 @@ def parse_method_calls_in_modules(modules):
                             full_name.insert(0, current.id)
                         method_name = ".".join(full_name)
 
-                    if method_name:
+                    # We do not care about method calls that start with 'self.', since it's for sure defined inside the current file
+                    if method_name and not method_name.startswith("self."):
                         method_call_count[method_name] += 1
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
                     has_docstring = ast.get_docstring(node, clean=False)
@@ -124,6 +127,24 @@ def parse_method_calls_in_modules(modules):
 
     return result
 
+def calculate_dependencies(modules):
+    result = {}
+
+    for (module_name, module) in modules.items():
+        modified_module = module
+        dependencies = defaultdict(int)
+        internal_imports = module.internal_imports
+        for (method_name, method_call_count) in module.method_calls.items():
+            dependency_name = method_name[:method_name.rfind('.')]
+            dependency = next((tup for tup in internal_imports if dependency_name in tup), None)
+            if dependency:
+                dependencies[dependency_name] += method_call_count
+
+        modified_module.dependencies = dependencies
+        result[module_name] = modified_module
+
+    return result
+
 
 def main():
     input_params = sys.argv
@@ -135,6 +156,9 @@ def main():
     modules = get_exports_from_modules_recursive(repo_dir, "")
 
     modules = parse_method_calls_in_modules(modules)
+
+    modules = calculate_dependencies(modules)
+
     print(json.dumps([json.loads(str(module)) for module in modules.values()], indent=2))
 
 
