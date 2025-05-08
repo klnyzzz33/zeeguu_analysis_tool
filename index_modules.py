@@ -1,6 +1,7 @@
 import sys
 import os
 import ast
+import json
 
 
 class Module:
@@ -8,13 +9,21 @@ class Module:
         self.name = name
         self.path = path
         self.exports = []
-        self.imports = []
+        self.internal_imports = []
+        self.external_imports = []
         self.method_calls = []
         self.LOC = 0
 
     def __str__(self):
-        return (self.name + " '<" + self.path + ">': exports=" + str(self.exports) + ", imports=" + str(self.imports)
-                + ", method_calls=" + str(self.method_calls) + ", LOC=" + str(self.LOC))
+        return json.dumps({
+            "name": self.name,
+            "path": self.path,
+            "exports": self.exports,
+            "internal_imports": self.internal_imports,
+            "external_imports": self.external_imports,
+            "method_calls": self.method_calls,
+            "LOC": self.LOC
+        }, indent=2)
 
     def __repr__(self):
         return self.__str__()
@@ -58,6 +67,7 @@ def get_exports_from_modules_recursive(base_dir, parent_package):
 
 
 def parse_method_calls_in_modules(modules):
+    module_names = list(modules.keys())
     result = {}
 
     for (module_name, module) in modules.items():
@@ -70,10 +80,16 @@ def parse_method_calls_in_modules(modules):
             for node in ast.walk(source_tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
-                        modified_module.imports.append((alias.name, None, alias.asname))
+                        if alias.name in module_names:
+                            modified_module.internal_imports.append((alias.name, None, alias.asname))
+                        else:
+                            modified_module.external_imports.append((alias.name, None, alias.asname))
                 elif isinstance(node, ast.ImportFrom):
                     for alias in node.names:
-                        modified_module.imports.append((node.module, alias.name, alias.asname))
+                        if node.module in module_names:
+                            modified_module.internal_imports.append((node.module, alias.name, alias.asname))
+                        else:
+                            modified_module.external_imports.append((node.module, alias.name, alias.asname))
                 elif isinstance(node, ast.Call):
                     if isinstance(node.func, ast.Name):
                         modified_module.method_calls.append(node.func.id)
@@ -104,8 +120,7 @@ def main():
     modules = get_exports_from_modules_recursive(repo_dir, "")
 
     modules = parse_method_calls_in_modules(modules)
-    for (module_name, module) in modules.items():
-        print(module)
+    print(json.dumps([json.loads(str(module)) for module in modules.values()], indent=2))
 
 
 if __name__ == "__main__":
