@@ -6,6 +6,8 @@ from collections import defaultdict
 
 from pyvis.network import Network
 
+skip_analyze = [".githooks", ".github", ".venv"]
+
 
 class Module:
     def __init__(self, name, path=None):
@@ -141,7 +143,7 @@ def get_exports_from_modules_recursive(base_dir, parent_package):
                 module = Module(module_name, full_path)
                 module.exports = function_defs
                 result[module_name] = module
-        elif os.path.isdir(full_path):
+        elif os.path.isdir(full_path) and file not in skip_analyze:
             result.update(get_exports_from_modules_recursive(full_path, parent_package))
 
     return result
@@ -276,16 +278,22 @@ def aggregate_modules_by_level(modules, level):
 
 def create_graph(modules):
     g = Network(directed=True)
+    g.force_atlas_2based(gravity=-50, central_gravity=0.01, spring_length=150, spring_strength=0.08, damping=0.4)
 
-    max_loc = max(module.LOC for module in modules.values())
-    max_weight = max(
-        weight for module in modules.values()
-        for weight in module.dependencies.values()
-    )
+    max_loc = 0
+    max_dependencies = 0
+    for module in modules.values():
+        if module.LOC > max_loc:
+            max_loc = module.LOC
+        for count in module.dependencies.values():
+            if count > max_dependencies:
+                max_dependencies = count
 
+    node_sizes = {}
     for module in modules.values():
         size = (module.LOC / max_loc) * 50 + 10
         font_size = (module.LOC / max_loc) * 20 + 10
+        node_sizes[module.name] = size
         g.add_node(
             module.name,
             label=module.name,
@@ -294,15 +302,23 @@ def create_graph(modules):
         )
 
     for module in modules.values():
-        for dependency, weight in module.dependencies.items():
-            edge_width = (weight / max_weight) * 5 + 1
+        for dependency, count in module.dependencies.items():
+            edge_width = (count / max_dependencies) * 5 + 1
+            font_size = (count / max_dependencies) * 15 + 10
+            from_size = node_sizes[module.name]
+            to_size = node_sizes[dependency]
+            base_length = 300 - (count / max_dependencies) * 100
+            edge_length = from_size + to_size + base_length
             g.add_edge(
                 module.name,
                 dependency,
-                weight=weight,
                 width=edge_width,
-                label=str(weight),
-                font={"size": 10}
+                label=str(count),
+                font={"size": font_size},
+                arrows={"to": {"enabled": True, "scaleFactor": 0.35}},
+                arrowStrikethrough=False,
+                smooth={"enabled": False},
+                length=edge_length
             )
 
     g.show("module_view.html")
@@ -311,7 +327,7 @@ def create_graph(modules):
 def main():
     input_params = sys.argv
     if len(input_params) < 2:
-        print("Usage: python index_modules.py <repo_dir>")
+        print("Usage: python recover_module_view.py <repo_dir>")
         exit(1)
 
     repo_dir = input_params[1]
@@ -323,7 +339,7 @@ def main():
 
     modules = calculate_dependencies(modules)
 
-    print(modules)
+    # print(modules)
 
     modules = aggregate_modules_by_level(modules, 2)
 
@@ -332,3 +348,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# TODO
+# 1. handling class imports
+# 2. handle imports from __init__.py files
+# 3. (optional) make it possible to aggregate subpackages with different levels (like archlens)
