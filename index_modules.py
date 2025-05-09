@@ -1,18 +1,20 @@
-import sys
-import os
 import ast
 import json
+import os
+import sys
 from collections import defaultdict
+
+from pyvis.network import Network
 
 
 class Module:
-    def __init__(self, name, path):
+    def __init__(self, name, path=None):
         self.name = name
         self.path = path
         self.exports = []
         self.internal_imports = []
         self.external_imports = []
-        self.method_calls = []
+        self.method_calls = defaultdict(int)
         self.dependencies = []
         self.LOC = 0
 
@@ -34,6 +36,78 @@ class Module:
 
     def __repr__(self):
         return self.__str__()
+
+
+class CustomVisitor(ast.NodeVisitor):
+    def __init__(self, module, module_names):
+        self.module = module
+        self.module_names = module_names
+        self.loc_exclude = set()
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            import_entry = (alias.name, None, alias.asname)
+            if alias.name in self.module_names:
+                self.module.internal_imports.append(import_entry)
+            else:
+                self.module.external_imports.append(import_entry)
+
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+        for alias in node.names:
+            import_entry = (node.module, alias.name, alias.asname)
+            if node.module in self.module_names:
+                self.module.internal_imports.append(import_entry)
+            else:
+                self.module.external_imports.append(import_entry)
+
+        self.generic_visit(node)
+
+    def visit_Call(self, node):
+        method_name = None
+        if isinstance(node.func, ast.Name):
+            method_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            full_name = []
+            current = node.func
+            while isinstance(current, ast.Attribute):
+                full_name.insert(0, current.attr)
+                current = current.value
+            if isinstance(current, ast.Name):
+                full_name.insert(0, current.id)
+            method_name = ".".join(full_name)
+
+        if method_name and not method_name.startswith("self."):
+            self.module.method_calls[method_name] += 1
+
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node):
+        self._exclude_docstring(node)
+
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node):
+        self._exclude_docstring(node)
+
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node):
+        self._exclude_docstring(node)
+
+        self.generic_visit(node)
+
+    def _exclude_docstring(self, node):
+        docstring = ast.get_docstring(node, clean=False)
+        if docstring:
+            doc_node = node.body[0]
+            self.loc_exclude.update(range(doc_node.lineno, doc_node.end_lineno + 1))
+
+    def generic_visit(self, node):
+        if hasattr(node, 'lineno') and node.lineno not in self.loc_exclude:
+            self.module.LOC += 1
+        super().generic_visit(node)
 
 
 def get_exports_from_modules_recursive(base_dir, parent_package):
@@ -79,55 +153,11 @@ def parse_method_calls_in_modules(modules):
 
     for (module_name, module) in modules.items():
         with open(module.path, mode="r", encoding="utf-8") as f:
-            modified_module = module
-            loc_exclude = set()
-            loc = set()
-
-            method_call_count = defaultdict(int)
-
             source_tree = ast.parse(f.read())
-            for node in ast.walk(source_tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name in module_names:
-                            modified_module.internal_imports.append((alias.name, None, alias.asname))
-                        else:
-                            modified_module.external_imports.append((alias.name, None, alias.asname))
-                elif isinstance(node, ast.ImportFrom):
-                    for alias in node.names:
-                        if node.module in module_names:
-                            modified_module.internal_imports.append((node.module, alias.name, alias.asname))
-                        else:
-                            modified_module.external_imports.append((node.module, alias.name, alias.asname))
-                elif isinstance(node, ast.Call):
-                    method_name = None
-                    if isinstance(node.func, ast.Name):
-                        method_name = node.func.id
-                    elif isinstance(node.func, ast.Attribute):
-                        full_name = []
-                        current = node.func
-                        while isinstance(current, ast.Attribute):
-                            full_name.insert(0, current.attr)
-                            current = current.value
-                        if isinstance(current, ast.Name):
-                            full_name.insert(0, current.id)
-                        method_name = ".".join(full_name)
+            visitor = CustomVisitor(module, module_names)
+            visitor.visit(source_tree)
 
-                    # We do not care about method calls that start with 'self.', since it's for sure defined inside the current file
-                    if method_name and not method_name.startswith("self."):
-                        method_call_count[method_name] += 1
-                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
-                    has_docstring = ast.get_docstring(node, clean=False)
-                    if has_docstring:
-                        docstring = node.body[0]
-                        loc_exclude.update(list(range(docstring.lineno, docstring.end_lineno + 1)))
-
-                if hasattr(node, 'lineno') and node.lineno not in loc_exclude:
-                    loc.add(node.lineno)
-
-            modified_module.method_calls = method_call_count
-            modified_module.LOC = len(loc)
-            result[module_name] = modified_module
+            result[module_name] = visitor.module
 
     return result
 
@@ -149,38 +179,133 @@ def resolve_internal_imports(modules):
 
 def calculate_dependencies(modules):
     result = {}
+    module_names = list(modules.keys())
 
     for (module_name, module) in modules.items():
         modified_module = module
         dependencies = defaultdict(int)
         internal_imports = module.internal_imports
         for (method_name, method_call_count) in module.method_calls.items():
-            pos = method_name.rfind('.')
             dependency = None
+
+            pos = method_name.rfind('.')
             if pos != -1:
                 dependency_name = method_name[:pos]
-                dependency = next((module.name for (module, _, alias) in internal_imports
-                                if module.name == dependency_name or alias == dependency_name), None)
-                # TODO ide jön az utolsó case
+                dependency = handle_qualified_call(modules, module_names, internal_imports, dependency_name)
             else:
-                # itt export vizsgálat
-                for (import_module, import_submodule, import_alias) in reversed(internal_imports):
-                    if import_submodule == '*' or import_submodule == method_name:
-                        for export in import_module.exports:
-                            if export == method_name:
-                                dependency = import_module.name
-                                break
-                        if dependency:
-                            break
-                    elif import_alias == method_name:
-                        dependency = import_module.name
-                        break
-            dependencies[dependency] += method_call_count
+                dependency = handle_unqualified_call(internal_imports, method_name)
+
+            if dependency:
+                dependencies[dependency] += method_call_count
 
         modified_module.dependencies = dependencies
         result[module_name] = modified_module
 
     return result
+
+
+def handle_qualified_call(modules, module_names, internal_imports, dependency_name):
+    dependency = None
+
+    for (import_module, import_submodule, import_alias) in reversed(internal_imports):
+        if import_alias == dependency_name:
+            if import_submodule:
+                qualified_name = import_module.name + '.' + import_submodule
+                if qualified_name in module_names:
+                    dependency = modules[qualified_name].name
+                    break
+            else:
+                dependency = import_module.name
+                break
+        elif import_submodule == dependency_name:
+            qualified_name = import_module.name + '.' + import_submodule
+            if qualified_name in module_names:
+                dependency = modules[qualified_name].name
+                break
+        elif import_module.name == dependency_name:
+            dependency = import_module.name
+            break
+
+    return dependency
+
+
+def handle_unqualified_call(internal_imports, method_name):
+    dependency = None
+
+    for (import_module, import_submodule, import_alias) in reversed(internal_imports):
+        if import_alias == method_name:
+            dependency = import_module.name
+            break
+        elif import_submodule == '*' or import_submodule == method_name:
+            for export in import_module.exports:
+                if export == method_name:
+                    dependency = import_module.name
+                    break
+            if dependency:
+                break
+
+    return dependency
+
+
+def aggregate_modules_by_level(modules, level):
+    aggregated = {}
+
+    group_map = defaultdict(list)
+    for module in modules.values():
+        parts = module.name.split(".")
+        group_key = ".".join(parts[:level])
+        group_map[group_key].append(module)
+
+    for group_key, module_list in group_map.items():
+        agg_module = Module(name=group_key)
+        agg_module.LOC = 0
+        agg_module.dependencies = defaultdict(int)
+
+        for mod in module_list:
+            agg_module.LOC += mod.LOC
+
+            for dep, weight in mod.dependencies.items():
+                dep_key = ".".join(dep.split(".")[:level])
+                if dep_key != group_key:
+                    agg_module.dependencies[dep_key] += weight
+
+        aggregated[group_key] = agg_module
+
+    return aggregated
+
+
+def create_graph(modules):
+    g = Network(directed=True)
+
+    max_loc = max(module.LOC for module in modules.values())
+    max_weight = max(
+        weight for module in modules.values()
+        for weight in module.dependencies.values()
+    )
+
+    for module in modules.values():
+        size = (module.LOC / max_loc) * 50 + 10
+        font_size = (module.LOC / max_loc) * 20 + 10
+        g.add_node(
+            module.name,
+            label=module.name,
+            size=size,
+            font={"size": font_size}
+        )
+
+    for module in modules.values():
+        for dependency, weight in module.dependencies.items():
+            edge_width = (weight / max_weight) * 5 + 1
+            g.add_edge(
+                module.name,
+                dependency,
+                weight=weight,
+                width=edge_width,
+                label=str(weight),
+                font={"size": 10}
+            )
+
+    g.show("module_view.html")
 
 
 def main():
@@ -198,7 +323,11 @@ def main():
 
     modules = calculate_dependencies(modules)
 
-    print(json.dumps([module.to_dict() for module in modules.values()], indent=2))
+    print(modules)
+
+    modules = aggregate_modules_by_level(modules, 2)
+
+    create_graph(modules)
 
 
 if __name__ == "__main__":
