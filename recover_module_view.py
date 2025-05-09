@@ -278,7 +278,7 @@ def aggregate_modules_by_level(modules, level):
 
 def create_graph(modules):
     g = Network(directed=True)
-    g.force_atlas_2based(gravity=-50, central_gravity=0.01, spring_length=150, spring_strength=0.08, damping=0.4)
+    g.force_atlas_2based(gravity=-100, central_gravity=0.01, spring_length=150, spring_strength=0.08, damping=0.4)
 
     max_loc = 0
     max_dependencies = 0
