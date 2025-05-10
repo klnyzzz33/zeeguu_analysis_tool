@@ -1,0 +1,13 @@
+{
+  "levels": {
+    "zeeguu.api": 0,
+    "zeeguu.core": 0,
+    "tools": 0
+  },
+  "only_aggregates": false,
+  "skip_analyze": [
+    ".githooks",
+    ".github",
+    ".venv"
+  ]
+}

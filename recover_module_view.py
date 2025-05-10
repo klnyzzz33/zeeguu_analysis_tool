@@ -6,8 +6,6 @@ from collections import defaultdict
 
 from pyvis.network import Network
 
-skip_analyze = [".githooks", ".github", ".venv"]
-
 
 class Module:
     def __init__(self, name, path=None):
@@ -78,6 +76,8 @@ class CustomVisitor(ast.NodeVisitor):
                 current = current.value
             if isinstance(current, ast.Name):
                 full_name.insert(0, current.id)
+            elif isinstance(current, ast.Call):
+                return self.generic_visit(node)
             method_name = ".".join(full_name)
 
         if method_name and not method_name.startswith("self."):
@@ -112,7 +112,7 @@ class CustomVisitor(ast.NodeVisitor):
         super().generic_visit(node)
 
 
-def get_exports_from_modules_recursive(base_dir, parent_package):
+def get_exports_from_modules_recursive(base_dir, parent_package, skip_analyze=[]):
     result = {}
 
     files = os.listdir(base_dir)
@@ -135,8 +135,8 @@ def get_exports_from_modules_recursive(base_dir, parent_package):
 
             with open(full_path, mode="r", encoding="utf-8") as f:
                 function_defs = []
-                tree = ast.parse(f.read())
-                for node in tree.body:
+                source_tree = ast.parse(f.read())
+                for node in source_tree.body:
                     if isinstance(node, ast.FunctionDef):
                         function_defs.append(node.name)
 
@@ -144,7 +144,7 @@ def get_exports_from_modules_recursive(base_dir, parent_package):
                 module.exports = function_defs
                 result[module_name] = module
         elif os.path.isdir(full_path) and file not in skip_analyze:
-            result.update(get_exports_from_modules_recursive(full_path, parent_package))
+            result.update(get_exports_from_modules_recursive(full_path, parent_package, skip_analyze))
 
     return result
 
@@ -249,14 +249,14 @@ def handle_unqualified_call(internal_imports, method_name):
     return dependency
 
 
-def aggregate_modules_by_level(modules, level):
+def aggregate_modules_by_levels(modules, levels, only_aggregates):
     aggregated = {}
 
     group_map = defaultdict(list)
     for module in modules.values():
-        parts = module.name.split(".")
-        group_key = ".".join(parts[:level])
-        group_map[group_key].append(module)
+        group_key = get_aggregate_key(module.name, levels, only_aggregates)
+        if group_key:
+            group_map[group_key].append(module)
 
     for group_key, module_list in group_map.items():
         agg_module = Module(name=group_key)
@@ -266,19 +266,36 @@ def aggregate_modules_by_level(modules, level):
         for mod in module_list:
             agg_module.LOC += mod.LOC
 
-            for dep, weight in mod.dependencies.items():
-                dep_key = ".".join(dep.split(".")[:level])
-                if dep_key != group_key:
-                    agg_module.dependencies[dep_key] += weight
+            for dep_name, weight in mod.dependencies.items():
+                dep_group_key = get_aggregate_key(dep_name, levels, only_aggregates)
+                if dep_group_key and dep_group_key != group_key:
+                    agg_module.dependencies[dep_group_key] += weight
 
         aggregated[group_key] = agg_module
 
     return aggregated
 
 
+def get_aggregate_key(module_name, levels, only_aggregates=False):
+    group_key = module_name
+    parts = module_name.split(".")
+
+    for i in range(1, len(parts) + 1):
+        sub_module = ".".join(parts[:i])
+        if sub_module in levels.keys():
+            depth_limit = i + levels[sub_module]
+            if len(parts) > depth_limit:
+                group_key = ".".join(parts[:depth_limit])
+            break
+        elif only_aggregates:
+            group_key = None
+
+    return group_key
+
+
 def create_graph(modules):
     g = Network(directed=True)
-    g.force_atlas_2based(gravity=-100, central_gravity=0.01, spring_length=150, spring_strength=0.08, damping=0.4)
+    g.force_atlas_2based(gravity=-50, central_gravity=0.01, spring_length=150, spring_strength=0.08, damping=0.4)
 
     max_loc = 0
     max_dependencies = 0
@@ -317,7 +334,7 @@ def create_graph(modules):
                 font={"size": font_size},
                 arrows={"to": {"enabled": True, "scaleFactor": 0.35}},
                 arrowStrikethrough=False,
-                smooth={"enabled": False},
+                smooth={"enabled": True},
                 length=edge_length
             )
 
@@ -329,21 +346,25 @@ def main():
     if len(input_params) < 2:
         print("Usage: python recover_module_view.py <repo_dir>")
         exit(1)
-
     repo_dir = input_params[1]
-    modules = get_exports_from_modules_recursive(repo_dir, "")
 
-    modules = parse_method_calls_in_modules(modules)
+    with open("settings.json", mode="r", encoding="utf-8") as f:
+        config = json.load(f)
 
-    modules = resolve_internal_imports(modules)
+        skip_analyze = config["skip_analyze"]
+        modules = get_exports_from_modules_recursive(repo_dir, "", skip_analyze)
 
-    modules = calculate_dependencies(modules)
+        modules = parse_method_calls_in_modules(modules)
 
-    # print(modules)
+        modules = resolve_internal_imports(modules)
 
-    modules = aggregate_modules_by_level(modules, 2)
+        modules = calculate_dependencies(modules)
 
-    create_graph(modules)
+        levels = config["levels"]
+        only_aggregates = config["only_aggregates"]
+        modules = aggregate_modules_by_levels(modules, levels, only_aggregates)
+
+        create_graph(modules)
 
 
 if __name__ == "__main__":
@@ -352,4 +373,3 @@ if __name__ == "__main__":
 # TODO
 # 1. handling class imports
 # 2. handle imports from __init__.py files
-# 3. (optional) make it possible to aggregate subpackages with different levels (like archlens)
