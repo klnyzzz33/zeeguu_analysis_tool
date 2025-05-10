@@ -17,6 +17,7 @@ class Module:
         self.method_calls = defaultdict(int)
         self.dependencies = []
         self.LOC = 0
+        self.is_package = False
 
     def to_dict(self):
         return {
@@ -28,7 +29,8 @@ class Module:
             "external_imports": self.external_imports,
             "method_calls": self.method_calls,
             "dependencies": self.dependencies,
-            "LOC": self.LOC
+            "LOC": self.LOC,
+            "is_package": self.is_package,
         }
 
     def __str__(self):
@@ -39,15 +41,16 @@ class Module:
 
 
 class CustomVisitor(ast.NodeVisitor):
-    def __init__(self, module, module_names):
+    def __init__(self, module, modules):
         self.module = module
-        self.module_names = module_names
+        self.modules = modules
         self.loc_exclude = set()
 
     def visit_Import(self, node):
+        module_names = self.modules.keys()
         for alias in node.names:
             import_entry = (alias.name, None, alias.asname)
-            if alias.name in self.module_names:
+            if alias.name in module_names:
                 self.module.internal_imports.append(import_entry)
             else:
                 self.module.external_imports.append(import_entry)
@@ -55,12 +58,29 @@ class CustomVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
+        module_names = self.modules.keys()
         for alias in node.names:
+            if node.level > 0:
+                cut_index = node.level if not self.module.is_package else node.level - 1
+                base_module_name = self.module.name.split(".")[:-cut_index] \
+                    if cut_index > 0 else self.module.name.split(".")
+
+                node.module = ".".join(base_module_name + ([node.module] if node.module else []))
+
             import_entry = (node.module, alias.name, alias.asname)
-            if node.module in self.module_names:
+            if node.module in module_names:
                 self.module.internal_imports.append(import_entry)
             else:
                 self.module.external_imports.append(import_entry)
+
+            if self.module.is_package:
+                if alias.asname:
+                    self.module.exports.append(alias.asname)
+                elif alias.name:
+                    if alias.name != "*":
+                        self.module.exports.append(alias.name)
+                    else:
+                        self.module.exports.extend(self.modules[node.module].exports)
 
         self.generic_visit(node)
 
@@ -142,6 +162,8 @@ def get_exports_from_modules_recursive(base_dir, parent_package, skip_analyze=[]
 
                 module = Module(module_name, full_path)
                 module.exports = function_defs
+                if file == "__init__.py":
+                    module.is_package = True
                 result[module_name] = module
         elif os.path.isdir(full_path) and file not in skip_analyze:
             result.update(get_exports_from_modules_recursive(full_path, parent_package, skip_analyze))
@@ -150,13 +172,12 @@ def get_exports_from_modules_recursive(base_dir, parent_package, skip_analyze=[]
 
 
 def parse_method_calls_in_modules(modules):
-    module_names = list(modules.keys())
     result = {}
 
     for (module_name, module) in modules.items():
         with open(module.path, mode="r", encoding="utf-8") as f:
             source_tree = ast.parse(f.read())
-            visitor = CustomVisitor(module, module_names)
+            visitor = CustomVisitor(module, modules)
             visitor.visit(source_tree)
 
             result[module_name] = visitor.module
@@ -185,8 +206,8 @@ def calculate_dependencies(modules):
 
     for (module_name, module) in modules.items():
         modified_module = module
-        dependencies = defaultdict(int)
         internal_imports = module.internal_imports
+        dependencies = {imp[0].name: 0 for imp in internal_imports}
         for (method_name, method_call_count) in module.method_calls.items():
             dependency = None
 
@@ -212,7 +233,10 @@ def handle_qualified_call(modules, module_names, internal_imports, dependency_na
     for (import_module, import_submodule, import_alias) in reversed(internal_imports):
         if import_alias == dependency_name:
             if import_submodule:
-                qualified_name = import_module.name + '.' + import_submodule
+                qualified_name = import_module.name
+                if not import_module.is_package:
+                    qualified_name = qualified_name + '.' + import_submodule
+
                 if qualified_name in module_names:
                     dependency = modules[qualified_name].name
                     break
@@ -220,7 +244,10 @@ def handle_qualified_call(modules, module_names, internal_imports, dependency_na
                 dependency = import_module.name
                 break
         elif import_submodule == dependency_name:
-            qualified_name = import_module.name + '.' + import_submodule
+            qualified_name = import_module.name
+            if not import_module.is_package:
+                qualified_name = qualified_name + '.' + import_submodule
+
             if qualified_name in module_names:
                 dependency = modules[qualified_name].name
                 break
@@ -235,10 +262,10 @@ def handle_unqualified_call(internal_imports, method_name):
     dependency = None
 
     for (import_module, import_submodule, import_alias) in reversed(internal_imports):
-        if import_alias == method_name:
+        if import_alias == method_name or import_submodule == method_name:
             dependency = import_module.name
             break
-        elif import_submodule == '*' or import_submodule == method_name:
+        elif import_submodule == '*':
             for export in import_module.exports:
                 if export == method_name:
                     dependency = import_module.name
@@ -326,16 +353,20 @@ def create_graph(modules):
             to_size = node_sizes[dependency]
             base_length = 300 - (count / max_dependencies) * 100
             edge_length = from_size + to_size + base_length
+            color = "blue" if count > 0 else "grey"
+            arrow_setting = {"to": {"enabled": True, "scaleFactor": 0.35}} if count > 0 else None
+            label = str(count) if count > 0 else None
             g.add_edge(
                 module.name,
                 dependency,
                 width=edge_width,
-                label=str(count),
                 font={"size": font_size},
-                arrows={"to": {"enabled": True, "scaleFactor": 0.35}},
                 arrowStrikethrough=False,
                 smooth={"enabled": True},
-                length=edge_length
+                length=edge_length,
+                color=color,
+                arrows=arrow_setting,
+                label=label
             )
 
     g.show("module_view.html")
@@ -372,4 +403,3 @@ if __name__ == "__main__":
 
 # TODO
 # 1. handling class imports
-# 2. handle imports from __init__.py files
