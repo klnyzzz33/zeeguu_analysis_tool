@@ -3,9 +3,10 @@
     "zeeguu.api": 0,
     "zeeguu.core": 0,
     "zeeguu.config": 0,
+    "zeeguu.logging": 0,
     "tools": 0
   },
-  "only_aggregates": false,
+  "only_aggregates": true,
   "skip_analyze": [
     ".githooks",
     ".github",

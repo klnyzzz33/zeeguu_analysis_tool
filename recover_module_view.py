@@ -4,8 +4,8 @@ import os
 import sys
 from collections import defaultdict
 
-from pyvis.network import Network
 import matplotlib.pyplot as plt
+from pyvis.network import Network
 
 
 class Module:
@@ -322,7 +322,6 @@ def aggregate_modules_by_levels(modules, levels, only_aggregates):
 
 
 def get_aggregate_key(module_name, levels, only_aggregates=False):
-    group_key = module_name
     parts = module_name.split(".")
 
     for i in range(1, len(parts) + 1):
@@ -330,12 +329,12 @@ def get_aggregate_key(module_name, levels, only_aggregates=False):
         if sub_module in levels.keys():
             depth_limit = i + levels[sub_module]
             if len(parts) > depth_limit:
-                group_key = ".".join(parts[:depth_limit])
-            break
-        elif only_aggregates:
-            group_key = None
+                return ".".join(parts[:depth_limit])
+            return module_name
 
-    return group_key
+    if only_aggregates:
+        return None
+    return module_name
 
 
 def create_graph(modules, use_heatmap=True):
