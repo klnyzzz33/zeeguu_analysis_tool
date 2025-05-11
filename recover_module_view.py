@@ -11,6 +11,7 @@ class Module:
     def __init__(self, name, path=None):
         self.name = name
         self.path = path
+        self.method_defs = set()
         self.exports = set()
         self.internal_imports = []
         self.external_imports = []
@@ -24,6 +25,7 @@ class Module:
         return {
             "name": self.name,
             "path": self.path,
+            "method_defs": list(self.method_defs),
             "exports": list(self.exports),
             "internal_imports": ["module: " + str(module.name) + ", submodule: " + str(submodule) + ", alias: "
                                  + str(alias) for (module, submodule, alias) in self.internal_imports],
@@ -174,14 +176,15 @@ def get_top_level_exports_from_modules(base_dir, parent_package, skip_analyze=[]
             module_name = module_name.replace(".py", "")
 
             with open(full_path, mode="r", encoding="utf-8") as f:
-                function_defs = set()
+                method_defs = set()
                 source_tree = ast.parse(f.read())
                 for node in source_tree.body:
                     if isinstance(node, ast.FunctionDef):
-                        function_defs.add(node.name)
+                        method_defs.add(node.name)
 
                 module = Module(module_name, full_path)
-                module.exports = function_defs
+                module.method_defs = method_defs
+                module.exports = method_defs.copy()
                 if file == "__init__.py":
                     module.is_package = True
                 result[module_name] = module
@@ -241,7 +244,7 @@ def calculate_dependencies(modules):
                 dependency_name = method_name[:pos]
                 dependency = handle_qualified_call(module_names, internal_imports, dependency_name)
             else:
-                dependency = handle_unqualified_call(internal_imports, method_name)
+                dependency = handle_unqualified_call(module.method_defs, internal_imports, method_name)
 
             if dependency:
                 dependencies[dependency] += method_call_count
@@ -275,7 +278,10 @@ def handle_qualified_call(module_names, internal_imports, dependency_name):
     return None
 
 
-def handle_unqualified_call(internal_imports, method_name):
+def handle_unqualified_call(method_defs, internal_imports, method_name):
+    if method_name in method_defs:
+        return None
+
     for (import_module, import_submodule, import_alias) in reversed(internal_imports):
         if import_alias == method_name or import_submodule == method_name:
             return import_module.name
