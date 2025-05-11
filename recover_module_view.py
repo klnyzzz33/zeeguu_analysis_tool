@@ -5,6 +5,7 @@ import sys
 from collections import defaultdict
 
 from pyvis.network import Network
+import matplotlib.pyplot as plt
 
 
 class Module:
@@ -337,10 +338,10 @@ def get_aggregate_key(module_name, levels, only_aggregates=False):
     return group_key
 
 
-def create_graph(modules):
+def create_graph(modules, use_heatmap=True):
     g = Network(directed=True)
     g.force_atlas_2based(gravity=-50, central_gravity=0.01, spring_length=150, spring_strength=0.08, damping=0.4)
-
+    cmap = plt.get_cmap("RdYlGn_r")
     max_loc = 0
     max_dependencies = 0
     for module in modules.values():
@@ -352,13 +353,17 @@ def create_graph(modules):
 
     node_sizes = {}
     for module in modules.values():
-        size = (module.LOC / max_loc) * 50 + 10
-        font_size = (module.LOC / max_loc) * 20 + 10
+        norm_loc = module.LOC / max_loc
+        size = norm_loc * 50 + 10
+        font_size = norm_loc * 20 + 10
+        rgba = cmap(norm_loc)
+        hex_color = '#%02x%02x%02x' % tuple(int(255 * c) for c in rgba[:3])
         node_sizes[module.name] = size
         g.add_node(
             module.name,
             label=module.name,
             size=size,
+            color=hex_color if use_heatmap else None,
             font={"size": font_size}
         )
 
@@ -370,7 +375,7 @@ def create_graph(modules):
             to_size = node_sizes[dependency]
             base_length = 300 - (count / max_dependencies) * 100
             edge_length = from_size + to_size + base_length
-            color = "blue" if count > 0 else "grey"
+            color = "black" if count > 0 else "grey"
             arrow_setting = {"to": {"enabled": True, "scaleFactor": 0.35}} if count > 0 else None
             label = str(count) if count > 0 else None
             g.add_edge(
@@ -388,6 +393,37 @@ def create_graph(modules):
             )
 
     g.show("module_view.html")
+
+    add_graph_legend(modules, use_heatmap)
+
+
+def add_graph_legend(modules, use_heatmap=True):
+    legend_html = """
+    <div style="position: absolute; top: 10px; right: 10px; padding: 10px;
+                background: white; border: 1px solid #ccc; font-size: 14px; z-index: 1000;">
+        <b>LOC Heatmap</b><br>
+        <div style="width: 120px; height: 10px;
+                    background: linear-gradient(to right, #1a9850, #91cf60, #d9ef8b, #fee08b, #fc8d59, #d73027);">
+        </div>
+        <div style="display: flex; justify-content: space-between; width: 120px;">
+            <span style="color:#1a9850;">Low</span><span style="color:#d73027;">High</span>
+        </div>
+    </div>
+    """
+    module_list = "<div style='position: absolute; top: 110px; right: 10px; padding: 10px; " \
+                  "background: white; border: 1px solid #ccc; font-size: 13px; max-height: 300px; " \
+                  "overflow-y: auto; width: 200px; z-index: 1000;'>"
+    module_list += "<b>LOC by modules</b><br><ul style='padding-left: 16px;'>"
+    for module in sorted(modules.values(), key=lambda m: m.LOC, reverse=True):
+        module_list += f"<li><b>{module.name}</b>: {module.LOC}</li>"
+    module_list += "</ul></div>"
+
+    with open("module_view.html", "r", encoding="utf-8") as f:
+        html = f.read()
+    added_html = legend_html + module_list if use_heatmap else module_list
+    html = html.replace("</body>", added_html + "</body>")
+    with open("module_view.html", "w", encoding="utf-8") as f:
+        f.write(html)
 
 
 def main():
@@ -413,7 +449,8 @@ def main():
         only_aggregates = config["only_aggregates"]
         modules = aggregate_modules_by_levels(modules, levels, only_aggregates)
 
-        create_graph(modules)
+        use_heatmap = config["use_heatmap"]
+        create_graph(modules, use_heatmap)
 
 
 if __name__ == "__main__":

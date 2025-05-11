@@ -2,6 +2,7 @@
   "levels": {
     "zeeguu.api": 0,
     "zeeguu.core": 0,
+    "zeeguu.config": 0,
     "tools": 0
   },
   "only_aggregates": false,
@@ -9,5 +10,6 @@
     ".githooks",
     ".github",
     ".venv"
-  ]
+  ],
+  "use_heatmap": true
 }
