@@ -11,19 +11,20 @@ class Module:
     def __init__(self, name, path=None):
         self.name = name
         self.path = path
-        self.exports = []
+        self.exports = set()
         self.internal_imports = []
         self.external_imports = []
         self.method_calls = defaultdict(int)
-        self.dependencies = []
+        self.dependencies = defaultdict(int)
         self.LOC = 0
         self.is_package = False
+        self.explore_queue = []
 
     def to_dict(self):
         return {
             "name": self.name,
             "path": self.path,
-            "exports": self.exports,
+            "exports": list(self.exports),
             "internal_imports": ["module: " + str(module.name) + ", submodule: " + str(submodule) + ", alias: "
                                  + str(alias) for (module, submodule, alias) in self.internal_imports],
             "external_imports": self.external_imports,
@@ -52,6 +53,9 @@ class CustomVisitor(ast.NodeVisitor):
             import_entry = (alias.name, None, alias.asname)
             if alias.name in module_names:
                 self.module.internal_imports.append(import_entry)
+
+                if alias.asname:
+                    self.module.exports.add(alias.asname)
             else:
                 self.module.external_imports.append(import_entry)
 
@@ -70,17 +74,16 @@ class CustomVisitor(ast.NodeVisitor):
             import_entry = (node.module, alias.name, alias.asname)
             if node.module in module_names:
                 self.module.internal_imports.append(import_entry)
-            else:
-                self.module.external_imports.append(import_entry)
 
-            if self.module.is_package:
                 if alias.asname:
-                    self.module.exports.append(alias.asname)
+                    self.module.exports.add(alias.asname)
                 elif alias.name:
                     if alias.name != "*":
-                        self.module.exports.append(alias.name)
+                        self.module.exports.add(alias.name)
                     else:
-                        self.module.exports.extend(self.modules[node.module].exports)
+                        self.module.explore_queue.append(node.module)
+            else:
+                self.module.external_imports.append(import_entry)
 
         self.generic_visit(node)
 
@@ -132,7 +135,22 @@ class CustomVisitor(ast.NodeVisitor):
         super().generic_visit(node)
 
 
-def get_exports_from_modules_recursive(base_dir, parent_package, skip_analyze=[]):
+def get_star_exports(module_name, modules, visited=set()):
+    if module_name in visited:
+        return []
+    visited.add(module_name)
+
+    module = modules[module_name]
+    exports = module.exports
+
+    for (import_module_name, submodule, import_alias) in module.internal_imports:
+        if submodule == "*":
+            exports.update(get_star_exports(import_module_name, modules, visited))
+
+    return exports
+
+
+def get_top_level_exports_from_modules(base_dir, parent_package, skip_analyze=[]):
     result = {}
 
     files = os.listdir(base_dir)
@@ -154,11 +172,11 @@ def get_exports_from_modules_recursive(base_dir, parent_package, skip_analyze=[]
             module_name = module_name.replace(".py", "")
 
             with open(full_path, mode="r", encoding="utf-8") as f:
-                function_defs = []
+                function_defs = set()
                 source_tree = ast.parse(f.read())
                 for node in source_tree.body:
                     if isinstance(node, ast.FunctionDef):
-                        function_defs.append(node.name)
+                        function_defs.add(node.name)
 
                 module = Module(module_name, full_path)
                 module.exports = function_defs
@@ -166,12 +184,12 @@ def get_exports_from_modules_recursive(base_dir, parent_package, skip_analyze=[]
                     module.is_package = True
                 result[module_name] = module
         elif os.path.isdir(full_path) and file not in skip_analyze:
-            result.update(get_exports_from_modules_recursive(full_path, parent_package, skip_analyze))
+            result.update(get_top_level_exports_from_modules(full_path, parent_package, skip_analyze))
 
     return result
 
 
-def parse_method_calls_in_modules(modules):
+def parse_imports_and_method_calls(modules):
     result = {}
 
     for (module_name, module) in modules.items():
@@ -181,6 +199,10 @@ def parse_method_calls_in_modules(modules):
             visitor.visit(source_tree)
 
             result[module_name] = visitor.module
+
+    for (module_name, module) in result.items():
+        for mod in module.explore_queue:
+            module.exports.update(get_star_exports(mod, modules))
 
     return result
 
@@ -214,7 +236,7 @@ def calculate_dependencies(modules):
             pos = method_name.rfind('.')
             if pos != -1:
                 dependency_name = method_name[:pos]
-                dependency = handle_qualified_call(modules, module_names, internal_imports, dependency_name)
+                dependency = handle_qualified_call(module_names, internal_imports, dependency_name)
             else:
                 dependency = handle_unqualified_call(internal_imports, method_name)
 
@@ -227,53 +249,39 @@ def calculate_dependencies(modules):
     return result
 
 
-def handle_qualified_call(modules, module_names, internal_imports, dependency_name):
-    dependency = None
-
+def handle_qualified_call(module_names, internal_imports, dependency_name):
     for (import_module, import_submodule, import_alias) in reversed(internal_imports):
         if import_alias == dependency_name:
             if import_submodule:
-                qualified_name = import_module.name
-                if not import_module.is_package:
-                    qualified_name = qualified_name + '.' + import_submodule
-
-                if qualified_name in module_names:
-                    dependency = modules[qualified_name].name
-                    break
-            else:
-                dependency = import_module.name
-                break
+                dependency = import_module.name + '.' + import_submodule
+                if dependency in module_names:
+                    return dependency
+            return import_module.name
         elif import_submodule == dependency_name:
-            qualified_name = import_module.name
-            if not import_module.is_package:
-                qualified_name = qualified_name + '.' + import_submodule
-
-            if qualified_name in module_names:
-                dependency = modules[qualified_name].name
-                break
+            dependency = import_module.name + '.' + import_submodule
+            if dependency in module_names:
+                return dependency
+            return import_module.name
         elif import_module.name == dependency_name:
-            dependency = import_module.name
-            break
+            return import_module.name
+        elif import_submodule == '*':
+            for export in import_module.exports:
+                if export == dependency_name:
+                    return import_module.name
 
-    return dependency
+    return None
 
 
 def handle_unqualified_call(internal_imports, method_name):
-    dependency = None
-
     for (import_module, import_submodule, import_alias) in reversed(internal_imports):
         if import_alias == method_name or import_submodule == method_name:
-            dependency = import_module.name
-            break
+            return import_module.name
         elif import_submodule == '*':
             for export in import_module.exports:
                 if export == method_name:
-                    dependency = import_module.name
-                    break
-            if dependency:
-                break
+                    return import_module.name
 
-    return dependency
+    return None
 
 
 def aggregate_modules_by_levels(modules, levels, only_aggregates):
@@ -383,9 +391,9 @@ def main():
         config = json.load(f)
 
         skip_analyze = config["skip_analyze"]
-        modules = get_exports_from_modules_recursive(repo_dir, "", skip_analyze)
+        modules = get_top_level_exports_from_modules(repo_dir, "", skip_analyze)
 
-        modules = parse_method_calls_in_modules(modules)
+        modules = parse_imports_and_method_calls(modules)
 
         modules = resolve_internal_imports(modules)
 
