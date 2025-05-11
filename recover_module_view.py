@@ -179,7 +179,7 @@ def get_top_level_exports_from_modules(base_dir, parent_package, skip_analyze=[]
                 method_defs = set()
                 source_tree = ast.parse(f.read())
                 for node in source_tree.body:
-                    if isinstance(node, ast.FunctionDef):
+                    if isinstance(node, ast.FunctionDef) or isinstance(node, ast.ClassDef):
                         method_defs.add(node.name)
 
                 module = Module(module_name, full_path)
@@ -383,7 +383,8 @@ def create_graph(modules):
                 length=edge_length,
                 color=color,
                 arrows=arrow_setting,
-                label=label
+                label=label,
+                dashes=count == 0
             )
 
     g.show("module_view.html")
@@ -417,6 +418,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# TODO
-# 1. handling class imports

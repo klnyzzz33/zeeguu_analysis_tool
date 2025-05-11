@@ -4,7 +4,7 @@
     "zeeguu.core": 0,
     "tools": 0
   },
-  "only_aggregates": true,
+  "only_aggregates": false,
   "skip_analyze": [
     ".githooks",
     ".github",
