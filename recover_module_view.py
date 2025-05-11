@@ -45,6 +45,7 @@ class CustomVisitor(ast.NodeVisitor):
     def __init__(self, module, modules):
         self.module = module
         self.modules = modules
+        self.loc_lines = set()
         self.loc_exclude = set()
 
     def visit_Import(self, node):
@@ -130,8 +131,9 @@ class CustomVisitor(ast.NodeVisitor):
             self.loc_exclude.update(range(doc_node.lineno, doc_node.end_lineno + 1))
 
     def generic_visit(self, node):
-        if hasattr(node, 'lineno') and node.lineno not in self.loc_exclude:
-            self.module.LOC += 1
+        if hasattr(node, 'lineno') and node.lineno not in self.loc_lines and node.lineno not in self.loc_exclude:
+            self.loc_lines.add(node.lineno)
+
         super().generic_visit(node)
 
 
@@ -197,6 +199,7 @@ def parse_imports_and_method_calls(modules):
             source_tree = ast.parse(f.read())
             visitor = CustomVisitor(module, modules)
             visitor.visit(source_tree)
+            visitor.module.LOC = len(visitor.loc_lines)
 
             result[module_name] = visitor.module
 
